@@ -41,7 +41,8 @@ const SPRL_PAYEES = new Set([
   "0x90337e484b1cb02132fc150d3afa262147348545", // MainFeeDistributor (PAR) on Polygon
   "0xc351c917a7f7b267e86a5f5368be40fd1788c32b", // fee Safe, which converts its share for the distributor
 ]);
-// The Insurance Fund, which covers the vaults' bad debt: 20% of the fees, supply side
+// The Insurance Fund, a DAO multisig that covers the vaults' bad debt: 20% of the fees. It is the protocol's own
+// reserve, funded from the fees and paid out to no outside supplier, so it is counted as protocol revenue.
 const INSURANCE_FUND_PAYEES = new Set([
   "0x6af71a3723d3c0ed69f84ee259c9de3019c2a77c", // Insurance Fund Safe, on every chain
   "0x2c6a1d01057258281efe31bb34bc0df24c13086e", // its earlier Safe on Polygon, with the same signers, replaced in late 2025
@@ -154,7 +155,6 @@ const getShares = async (api: ChainApi, feeDistributors: string[]) => {
 const fetch = async (options: FetchOptions) => {
   const { chain, fromApi, toApi, fromTimestamp, toTimestamp, createBalances, getLogs, dateString } = options;
   const dailyFees = createBalances();
-  const dailySupplySideRevenue = createBalances();
   const dailyRevenue = createBalances();
   const dailyProtocolRevenue = createBalances();
   const dailyHoldersRevenue = createBalances();
@@ -187,23 +187,25 @@ const fetch = async (options: FetchOptions) => {
     }
 
     dailyFees.add(stablex, fees, BORROWING_FEES);
-    dailySupplySideRevenue.add(stablex, fees * shares.insuranceFund, TO_INSURANCE_FUND);
     dailyRevenue.add(stablex, fees * shares.treasury, TO_TREASURY);
     dailyProtocolRevenue.add(stablex, fees * shares.treasury, TO_TREASURY);
+    dailyRevenue.add(stablex, fees * shares.insuranceFund, TO_INSURANCE_FUND);
+    dailyProtocolRevenue.add(stablex, fees * shares.insuranceFund, TO_INSURANCE_FUND);
     if (shares.sPrl) {
       dailyRevenue.add(stablex, fees * shares.sPrl, TO_PRL_HOLDERS);
       dailyHoldersRevenue.add(stablex, fees * shares.sPrl, holdersLabel);
     }
   });
 
-  return { dailyFees, dailySupplySideRevenue, dailyRevenue, dailyProtocolRevenue, dailyHoldersRevenue };
+  // PAR and paUSD are minted by the protocol itself: no lender or liquidity provider takes a share of the fees
+  return { dailyFees, dailyRevenue, dailyProtocolRevenue, dailyHoldersRevenue, dailySupplySideRevenue: 0 };
 };
 
 const methodology = {
   Fees: "Fees paid by PAR and paUSD borrowers in the Classic Vaults: the borrowing fee (interest), the 0.2% origination fee and the liquidation fee, all added to the vaults' debt. Measured as the change in the income accrued by each VaultsCore (the debt above the PAR or paUSD the core minted, as VaultsCoreState.availableIncome() computes it, plus the interest accrued since each collateral type's last refresh), plus the income released by the FeeDistributor that day.",
-  Revenue: "The fees without the Insurance Fund's 20%: the shares the FeeDistributor mints to the DAO Treasury and to the PRL stakers' payee, 80% of the fees. Revenue is protocol revenue plus holders revenue.",
-  ProtocolRevenue: "The DAO Treasury's share of the fees, from the FeeDistributor's payees, without the 15% for PRL holders: 80% before that share began on 1 May 2025, 65% since. Under PGP-42, from 25 May to 1 October 2026, the Treasury received 80%, but 15% of the fees went on to PRL holders (buybacks, then September's staking rewards paid by hand), so 65% is counted here.",
-  SupplySideRevenue: "20% of the fees, minted by the FeeDistributor to the Insurance Fund, which covers the vaults' bad debt.",
+  Revenue: "All the fees. PAR and paUSD are minted by the protocol against the borrowers' collateral, so no lender or liquidity provider takes a share: the FeeDistributor mints the fees to the DAO Treasury, the Insurance Fund and the PRL stakers' payee. Revenue is protocol revenue plus holders revenue.",
+  ProtocolRevenue: "The fees the protocol keeps, from the FeeDistributor's payees: 100% before 1 May 2025, 85% since. 20% go to the Insurance Fund, the protocol's own reserve against the vaults' bad debt, held by a DAO multisig. The rest is the DAO Treasury's share, without the 15% for PRL holders: 80% before that share began on 1 May 2025, 65% since. Under PGP-42, from 25 May to 1 October 2026, the Treasury received 80%, but 15% of the fees went on to PRL holders (buybacks, then September's staking rewards paid by hand), so 65% is counted for it.",
+  SupplySideRevenue: "None: no share of the fees is paid to an outside supplier.",
   HoldersRevenue: "The 15% of the fees for PRL holders since 1 May 2025, 0 before, measured at the fee source as that share of the day's fees. It is passed on to PRL stakers (sPRL1, sPRL2) through the RewardMerkleDistributor, and read from the FeeDistributor's payees. Under PGP-42, from 25 May to 31 August 2026, the DAO Treasury received that 15% to buy PRL back and burn it: a buyback funded by the fees, counted here at the fee source. September 2026, paid to PRL stakers by hand by the DAO Treasury on 1 October 2026, counts as staking rewards. The buybacks the DAO Treasury pays from its own holdings are not counted.",
 };
 
@@ -213,13 +215,12 @@ const breakdownMethodology = {
   },
   Revenue: {
     [TO_TREASURY]: "The DAO Treasury's share of the fees, without the 15% for PRL holders: 80% before 1 May 2025, 65% since.",
+    [TO_INSURANCE_FUND]: "20% of the fees, minted to the Insurance Fund, the protocol's own reserve against the vaults' bad debt.",
     [TO_PRL_HOLDERS]: "15% of the fees since 1 May 2025: passed on to PRL stakers, or spent on PRL buybacks under PGP-42 (25 May to 31 August 2026).",
   },
   ProtocolRevenue: {
     [TO_TREASURY]: "The DAO Treasury's share of the fees, without the 15% for PRL holders: 80% before 1 May 2025, 65% since, including the PGP-42 period, when the Treasury received 80% and passed 15% on to PRL holders (buybacks, then September's staking rewards).",
-  },
-  SupplySideRevenue: {
-    [TO_INSURANCE_FUND]: "20% of the fees, minted to the Insurance Fund, which covers the vaults' bad debt.",
+    [TO_INSURANCE_FUND]: "20% of the fees, minted to the Insurance Fund: a reserve the protocol keeps against the vaults' bad debt, held by a DAO multisig, not paid to an outside supplier.",
   },
   HoldersRevenue: {
     [METRIC.STAKING_REWARDS]: "15% of the fees passed on to PRL stakers through the RewardMerkleDistributor, from 1 May 2025 to 24 May 2026 and since 1 October 2026, plus September 2026, which the DAO Treasury paid to them by hand on 1 October 2026.",
